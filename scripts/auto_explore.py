@@ -8,9 +8,11 @@ Works with Flutter, React Native, and native Android apps.
 import argparse
 import base64
 import hashlib
+import http.client
 import io
 import json
 import os
+import ssl
 import subprocess
 import sys
 import time
@@ -20,7 +22,6 @@ import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
-from urllib.request import Request, urlopen
 
 try:
     from PIL import Image
@@ -286,48 +287,58 @@ class AutoExplorer:
         self.last_screenshot_path = ""
         self.grid_offset = 0
 
-        self.ws_queue = queue.Queue(maxsize=20)
-        self._ws_running = False
-        self._streaming = False
         self._screencap_lock = threading.Lock()
+        self._http_sender = None
+        self._send_queue = queue.Queue(maxsize=20)
         if self.server_url:
-            self._start_ws()
+            self._start_sender()
             self._start_streamer()
 
-    def _start_ws(self):
-        ws_url = self.server_url.replace("https://", "wss://").replace("http://", "ws://") + "/ws/device"
-        self._ws_running = True
-        self._ws_connected = False
-        print(f"  [ws] Connecting to {ws_url}")
+    def _get_http_conn(self):
+        from urllib.parse import urlparse
+        p = urlparse(self.server_url)
+        ctx = ssl.create_default_context()
+        return http.client.HTTPSConnection(p.hostname, p.port or 443, context=ctx, timeout=10)
+
+    def _start_sender(self):
+        self._sender_running = True
         def _run():
-            while self._ws_running:
+            conn = None
+            while self._sender_running:
                 try:
-                    import websocket
-                    ws = websocket.WebSocket()
-                    ws.connect(ws_url, timeout=10)
-                    self._ws_connected = True
-                    print(f"  [ws] Connected")
-                    ws.settimeout(5)
-                    while self._ws_running:
-                        try:
-                            data = self.ws_queue.get(timeout=3)
-                            if data is None:
-                                break
-                            ws.send_binary(data)
-                        except queue.Empty:
-                            try:
-                                ws.ping()
-                            except:
-                                break
-                    ws.close()
-                    self._ws_connected = False
-                except Exception as e:
-                    if self._ws_running:
-                        print(f"  [ws] Failed: {e}, retry 3s")
-                        self._ws_connected = False
-                        time.sleep(3)
-        self._ws_thread = threading.Thread(target=_run, daemon=True)
-        self._ws_thread.start()
+                    data = self._send_queue.get(timeout=2)
+                    if data is None:
+                        break
+                    if conn is None:
+                        conn = self._get_http_conn()
+                    conn.request("POST", "/api/screenshot", body=data, headers={"Content-Type": "application/json"})
+                    resp = conn.getresponse()
+                    resp.read()
+                except (BrokenPipeError, ConnectionError, http.client.RemoteDisconnected):
+                    conn = None
+                    try:
+                        if not self._sender_running:
+                            break
+                        data = self._send_queue.get(timeout=2)
+                        if data is None:
+                            break
+                        conn = self._get_http_conn()
+                        conn.request("POST", "/api/screenshot", body=data, headers={"Content-Type": "application/json"})
+                        resp = conn.getresponse()
+                        resp.read()
+                    except:
+                        conn = None
+                except queue.Empty:
+                    try:
+                        if conn:
+                            conn.request("GET", "/ping")
+                            conn.getresponse().read()
+                    except:
+                        conn = None
+                except Exception:
+                    conn = None
+        self._sender_thread = threading.Thread(target=_run, daemon=True)
+        self._sender_thread.start()
 
     def _start_streamer(self):
         self._streaming = True
@@ -342,30 +353,20 @@ class AutoExplorer:
                         with open(tmp_file, "rb") as f:
                             img_data = f.read()
                         img = Image.open(io.BytesIO(img_data))
-                        max_height = 720
-                        if img.height > max_height:
-                            ratio = max_height / img.height
-                            new_width = int(img.width * ratio)
-                            img = img.resize((new_width, max_height), Image.LANCZOS)
-                        buffer = io.BytesIO()
-                        img.convert("RGB").save(buffer, format="JPEG", quality=85, optimize=True)
-                        jpeg_data = buffer.getvalue()
+                        if img.height > 720:
+                            r = 720 / img.height
+                            img = img.resize((int(img.width * r), 720), Image.LANCZOS)
+                        buf = io.BytesIO()
+                        img.convert("RGB").save(buf, format="JPEG", quality=85, optimize=True)
+                        jpeg = buf.getvalue()
                         if os.path.exists(tmp_file):
                             os.remove(tmp_file)
                     except:
                         continue
-                payload = bytearray()
-                device_bytes = self.device_label.encode()
-                payload.extend(len(device_bytes).to_bytes(2, "big"))
-                payload.extend(device_bytes)
-                step_str = f"s{self.step_count}".encode()
-                payload.extend(len(step_str).to_bytes(2, "big"))
-                payload.extend(step_str)
-                payload.extend(jpeg_data)
-                if not self._ws_connected:
-                    continue
+                b64 = base64.b64encode(jpeg).decode()
+                payload = json.dumps({"image": b64, "step": f"s{self.step_count}", "device_id": self.device_label}).encode()
                 try:
-                    self.ws_queue.put(bytes(payload), timeout=1)
+                    self._send_queue.put(payload, timeout=1)
                 except:
                     pass
         self._streamer_thread = threading.Thread(target=_run, daemon=True)
@@ -450,38 +451,16 @@ class AutoExplorer:
             with open(filepath, "rb") as f:
                 img_data = f.read()
             img = Image.open(io.BytesIO(img_data))
-            max_height = 720
-            if img.height > max_height:
-                ratio = max_height / img.height
-                new_width = int(img.width * ratio)
-                img = img.resize((new_width, max_height), Image.LANCZOS)
-            if self._ws_connected:
-                buffer = io.BytesIO()
-                img.convert("RGB").save(buffer, format="JPEG", quality=85, optimize=True)
-                payload = bytearray()
-                device_bytes = self.device_label.encode()
-                payload.extend(len(device_bytes).to_bytes(2, "big"))
-                payload.extend(device_bytes)
-                step_bytes = str(self.step_count).encode()
-                payload.extend(len(step_bytes).to_bytes(2, "big"))
-                payload.extend(step_bytes)
-                payload.extend(buffer.getvalue())
-                self.ws_queue.put(bytes(payload))
-            else:
-                self._send_http_fallback(img)
+            if img.height > 720:
+                r = 720 / img.height
+                img = img.resize((int(img.width * r), 720), Image.LANCZOS)
+            buf = io.BytesIO()
+            img.convert("RGB").save(buf, format="JPEG", quality=85, optimize=True)
+            b64 = base64.b64encode(buf.getvalue()).decode()
+            payload = json.dumps({"image": b64, "step": self.step_count, "device_id": self.device_label}).encode()
+            self._send_queue.put_nowait(payload)
         except Exception as e:
             print(f"  [stream] Error: {e}")
-
-    def _send_http_fallback(self, img):
-        try:
-            buffer = io.BytesIO()
-            img.convert("RGB").save(buffer, format="JPEG", quality=60, optimize=True)
-            b64 = base64.b64encode(buffer.getvalue()).decode()
-            data = json.dumps({"image": b64, "step": self.step_count, "device_id": self.device_label}).encode()
-            req = Request(f"{self.server_url}/api/screenshot", data=data, headers={"Content-Type": "application/json"})
-            urlopen(req, timeout=5)
-        except Exception as e:
-            print(f"  [stream] HTTP fallback error: {e}")
 
     def strategy_ui_hierarchy(self) -> list[Element]:
         """Strategy 1: Standard uiautomator dump."""
@@ -673,8 +652,8 @@ class AutoExplorer:
 
         self._generate_summary()
         self._streaming = False
-        self._ws_running = False
-        self.ws_queue.put(None)
+        self._sender_running = False
+        self._send_queue.put(None)
 
         print(f"\n{'='*60}")
         print(f"Exploration Complete!")
