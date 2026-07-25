@@ -87,9 +87,7 @@ jobs:
             
             echo "=== Launching App ==="
             PACKAGE="${{ inputs.package_name }}"
-            ACTIVITY=$(adb shell cmd package resolve-activity --brief "$PACKAGE" | tail -n 1)
-            echo "Activity: $ACTIVITY"
-            adb shell am start -n "$ACTIVITY"
+            adb shell monkey -p "$PACKAGE" -c android.intent.category.LAUNCHER 1
             sleep 3
             
             echo "=== Running Auto-Explore ==="
