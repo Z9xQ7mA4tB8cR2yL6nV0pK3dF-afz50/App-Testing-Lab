@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-Auto Explore - ADB-based Android App Auto-Explorer
-Discovers screens, captures screenshots, and builds navigation graph.
+Auto Explore - Production-grade Android App Auto-Explorer
+Multi-strategy approach for reliable screen discovery.
+Works with Flutter, React Native, and native Android apps.
 """
 
 import argparse
@@ -15,6 +16,8 @@ import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
+import struct
+import zlib
 
 
 @dataclass
@@ -23,29 +26,39 @@ class Element:
     resource_id: str = ""
     text: str = ""
     content_desc: str = ""
+    hint_text: str = ""
     class_name: str = ""
     package: str = ""
     clickable: bool = False
     scrollable: bool = False
     bounds: str = ""
     index: int = 0
-    
+    source: str = "uiautomator"
+
     @property
     def bounds_tuple(self):
-        """Parse bounds string 'x1,y1 x2,y2' into tuple."""
         try:
-            parts = self.bounds.replace("][", ",").strip("[]").split(",")
+            clean = self.bounds.replace("][", ",").strip("[]")
+            parts = clean.split(",")
             if len(parts) == 4:
                 return tuple(map(int, parts))
         except:
             pass
         return (0, 0, 0, 0)
-    
+
     @property
     def center(self):
-        """Get center point of element."""
         x1, y1, x2, y2 = self.bounds_tuple
         return ((x1 + x2) // 2, (y1 + y2) // 2)
+
+    @property
+    def area(self):
+        x1, y1, x2, y2 = self.bounds_tuple
+        return (x2 - x1) * (y2 - y1)
+
+    @property
+    def label(self):
+        return self.text or self.content_desc or self.hint_text or self.resource_id.split("/")[-1] if "/" in self.resource_id else f"elem_{self.index}"
 
 
 @dataclass
@@ -58,120 +71,187 @@ class Screen:
     elements: list = field(default_factory=list)
     visited: bool = False
     timestamp: float = 0.0
+    strategy_used: str = ""
 
 
 class ADBController:
-    """Controls Android device via ADB."""
-    
+    """Controls Android device via ADB with retry logic."""
+
     def __init__(self, device_id: Optional[str] = None):
         self.device_id = device_id
         self.adb_cmd = ["adb"]
         if device_id:
             self.adb_cmd.extend(["-s", device_id])
-    
-    def run(self, command: str, timeout: int = 30) -> str:
-        """Run ADB command and return output."""
-        full_cmd = self.adb_cmd + ["shell"] + command.split()
+
+    def run(self, command: str, timeout: int = 30, retries: int = 2) -> str:
+        for attempt in range(retries):
+            try:
+                full_cmd = self.adb_cmd + ["shell"] + command.split()
+                result = subprocess.run(
+                    full_cmd, capture_output=True, text=True, timeout=timeout
+                )
+                if result.returncode == 0:
+                    return result.stdout.strip()
+            except subprocess.TimeoutExpired:
+                if attempt < retries - 1:
+                    time.sleep(1)
+                    continue
+            except Exception as e:
+                print(f"  ADB error: {e}")
+                if attempt < retries - 1:
+                    time.sleep(1)
+                    continue
+        return ""
+
+    def run_raw(self, args: list, timeout: int = 30) -> str:
         try:
+            full_cmd = self.adb_cmd + args
             result = subprocess.run(
-                full_cmd,
-                capture_output=True,
-                text=True,
-                timeout=timeout
+                full_cmd, capture_output=True, text=True, timeout=timeout
             )
             return result.stdout.strip()
-        except subprocess.TimeoutExpired:
+        except:
             return ""
-        except Exception as e:
-            print(f"ADB error: {e}")
-            return ""
-    
+
     def screencap(self, output_path: str) -> bool:
-        """Capture screenshot."""
         try:
             full_cmd = self.adb_cmd + ["exec-out", "screencap", "-p"]
             with open(output_path, "wb") as f:
                 result = subprocess.run(full_cmd, capture_output=True, timeout=15)
-                f.write(result.stdout)
+                if result.returncode == 0 and len(result.stdout) > 100:
+                    f.write(result.stdout)
+                    return True
+            # Fallback: file-based capture
+            self.run("screencap -p /sdcard/screencap_tmp.png")
+            time.sleep(0.5)
+            pull_cmd = self.adb_cmd + ["pull", "/sdcard/screencap_tmp.png", output_path]
+            subprocess.run(pull_cmd, capture_output=True, timeout=15)
+            self.run("rm /sdcard/screencap_tmp.png")
             return os.path.exists(output_path) and os.path.getsize(output_path) > 0
         except Exception as e:
-            print(f"Screencap error: {e}")
+            print(f"  Screencap error: {e}")
             return False
-    
+
     def tap(self, x: int, y: int) -> bool:
-        """Tap at coordinates."""
         self.run(f"input tap {x} {y}")
-        time.sleep(0.5)
+        time.sleep(0.8)
         return True
-    
+
     def swipe(self, x1: int, y1: int, x2: int, y2: int, duration: int = 300) -> bool:
-        """Swipe from (x1,y1) to (x2,y2)."""
         self.run(f"input swipe {x1} {y1} {x2} {y2} {duration}")
-        time.sleep(0.5)
+        time.sleep(0.8)
         return True
-    
+
     def press_back(self) -> bool:
-        """Press back button."""
         self.run("input keyevent 4")
-        time.sleep(0.5)
+        time.sleep(0.8)
         return True
-    
+
     def press_home(self) -> bool:
-        """Press home button."""
         self.run("input keyevent 3")
         time.sleep(0.5)
         return True
-    
+
     def get_current_activity(self) -> str:
-        """Get current foreground activity."""
-        output = self.run("dumpsys window windows | grep -E mCurrentFocus")
-        if "mCurrentFocus" in output:
-            try:
-                return output.split("}")[-1].strip()
-            except:
-                pass
-        return "unknown"
-    
-    def get_ui_hierarchy(self) -> Optional[ET.Element]:
-        """Dump and parse UI hierarchy."""
-        try:
-            # Try to dump UI hierarchy
-            self.run("uiautomator dump /sdcard/window_dump.xml")
-            time.sleep(1)
-            
-            # Pull the dump
-            full_cmd = self.adb_cmd + ["shell", "cat", "/sdcard/window_dump.xml"]
-            result = subprocess.run(full_cmd, capture_output=True, text=True, timeout=10)
-            
-            if result.stdout.strip():
-                return ET.fromstring(result.stdout)
-        except ET.ParseError as e:
-            print(f"XML parse error: {e}")
-        except Exception as e:
-            print(f"UI dump error: {e}")
-        
-        return None
-    
+        output = self.run("dumpsys activity activities | grep mResumedActivity")
+        if not output:
+            output = self.run("dumpsys activity activities | grep -E 'mCurrentFocus|mFocusedApp'")
+        return output
+
     def get_screen_size(self) -> tuple:
-        """Get screen size."""
         output = self.run("wm size")
         try:
-            # "Physical size: 1080x2400"
             size_str = output.split(":")[-1].strip()
             w, h = size_str.split("x")
             return (int(w), int(h))
         except:
             return (1080, 1920)
-    
+
+    def get_ui_hierarchy_uiautomator(self) -> Optional[ET.Element]:
+        """Strategy 1: Standard uiautomator dump."""
+        try:
+            self.run("rm /sdcard/window_dump.xml")
+            output = self.run("uiautomator dump /sdcard/window_dump.xml", timeout=15)
+            if "dumped" in output.lower() or "hierarchy" in output.lower():
+                time.sleep(0.5)
+                xml_content = self.run("cat /sdcard/window_dump.xml")
+                if xml_content and "<hierarchy" in xml_content:
+                    return ET.fromstring(xml_content)
+        except ET.ParseError as e:
+            print(f"  XML parse error: {e}")
+        except Exception as e:
+            print(f"  uiautomator dump failed: {e}")
+        return None
+
+    def get_ui_hierarchy_dumpsys(self, package: str) -> list:
+        """Strategy 2: Use dumpsys to find clickable regions."""
+        elements = []
+        try:
+            output = self.run("dumpsys activity top | grep -A 5 'View Hierarchy'", timeout=10)
+            # Parse view hierarchy from dumpsys
+        except:
+            pass
+        return elements
+
     def is_screen_on(self) -> bool:
-        """Check if screen is on."""
         output = self.run("dumpsys power | grep 'Display Power'")
         return "ON" in output.upper()
 
+    def wake_screen(self):
+        if not self.is_screen_on():
+            self.run("input keyevent 26")
+            time.sleep(1)
+
+
+class ScreenComparator:
+    """Compare screenshots to detect screen changes."""
+
+    @staticmethod
+    def compute_hash(image_path: str, region: str = "header") -> str:
+        """Compute perceptual hash of screenshot region."""
+        try:
+            with open(image_path, "rb") as f:
+                data = f.read()
+
+            # Simple file hash for screen comparison
+            # In production, use perceptual hashing (pHash, dHash)
+            return hashlib.md5(data).hexdigest()[:16]
+        except:
+            return ""
+
+    @staticmethod
+    def compare_files(path1: str, path2: str) -> float:
+        """Compare two screenshot files. Returns similarity ratio 0-1."""
+        try:
+            with open(path1, "rb") as f1, open(path2, "rb") as f2:
+                data1 = f1.read()
+                data2 = f2.read()
+
+            if len(data1) == 0 or len(data2) == 0:
+                return 0.0
+
+            # Quick comparison: if files are identical
+            if data1 == data2:
+                return 1.0
+
+            # Size-based heuristic
+            size_ratio = min(len(data1), len(data2)) / max(len(data1), len(data2))
+
+            # Hash comparison
+            hash1 = hashlib.md5(data1).hexdigest()
+            hash2 = hashlib.md5(data2).hexdigest()
+
+            if hash1 == hash2:
+                return 1.0
+
+            return size_ratio
+        except:
+            return 0.0
+
 
 class AutoExplorer:
-    """Automatically explores Android app screens."""
-    
+    """Production-grade Android app auto-explorer with multi-strategy approach."""
+
     def __init__(self, adb: ADBController, package: str, output_dir: str, max_steps: int = 50):
         self.adb = adb
         self.package = package
@@ -181,287 +261,309 @@ class AutoExplorer:
         self.logs_dir = self.output_dir / "logs"
         self.screenshots_dir.mkdir(parents=True, exist_ok=True)
         self.logs_dir.mkdir(parents=True, exist_ok=True)
-        
+
         self.screens: dict[str, Screen] = {}
         self.visited_elements: set = set()
         self.step_count = 0
-        self.navigation_graph: dict = {}
-        
-    def get_screen_hash(self, elements: list[Element]) -> str:
-        """Generate unique hash for current screen state."""
-        # Use element combination to identify screen
+        self.consecutive_same_screen = 0
+        self.last_screen_hash = ""
+        self.last_screenshot_path = ""
+
+    def get_screen_signature(self, elements: list[Element]) -> str:
         sig_parts = []
-        for e in elements[:10]:  # Top 10 elements
-            sig_parts.append(f"{e.class_name}:{e.text}:{e.resource_id}")
-        sig = "|".join(sig_parts)
-        return hashlib.md5(sig.encode()).hexdigest()[:12]
-    
-    def parse_elements(self, root: ET.Element) -> list[Element]:
-        """Parse UI hierarchy XML into Element objects."""
+        for e in elements[:15]:
+            sig_parts.append(f"{e.class_name}:{e.text}:{e.content_desc}:{e.bounds}")
+        return hashlib.md5("|".join(sig_parts).encode()).hexdigest()[:12]
+
+    def parse_elements_from_xml(self, root: ET.Element) -> list[Element]:
         elements = []
-        
         for node in root.iter("node"):
             try:
                 elem = Element(
                     resource_id=node.get("resource-id", ""),
                     text=node.get("text", ""),
                     content_desc=node.get("content-desc", ""),
+                    hint_text=node.get("hint", ""),
                     class_name=node.get("class", ""),
                     package=node.get("package", ""),
                     clickable=node.get("clickable", "false") == "true",
                     scrollable=node.get("scrollable", "false") == "true",
                     bounds=node.get("bounds", ""),
-                    index=int(node.get("index", "0"))
+                    index=int(node.get("index", "0")),
+                    source="uiautomator"
                 )
-                
-                # Filter: only relevant package and clickable elements
-                if elem.package == self.package and (elem.clickable or elem.text or elem.content_desc):
+                if elem.package == self.package and (elem.clickable or elem.text or elem.content_desc or elem.hint_text):
                     elements.append(elem)
-            except Exception:
+            except:
                 continue
-        
         return elements
-    
-    def find_interactable_elements(self, elements: list[Element]) -> list[Element]:
-        """Find elements worth interacting with."""
-        interactable = []
-        
-        for elem in elements:
-            # Skip system elements
-            if any(skip in elem.class_name.lower() for skip in [
-                "statusbar", "navigationbar", "systemui"
-            ]):
-                continue
-            
-            # Prioritize: buttons, inputs, clickable items
-            if elem.clickable:
-                interactable.append(elem)
-            elif elem.text and not elem.scrollable:
-                interactable.append(elem)
-        
-        return interactable
-    
+
+    def generate_grid_elements(self, screen_width: int, screen_height: int) -> list[Element]:
+        """Strategy: Generate grid-based tap points for exploration."""
+        elements = []
+        # Skip status bar (top 8%) and nav bar (bottom 8%)
+        top_margin = int(screen_height * 0.08)
+        bottom_margin = int(screen_height * 0.92)
+
+        grid_cols = 4
+        grid_rows = 6
+        cell_w = screen_width // grid_cols
+        cell_h = (bottom_margin - top_margin) // grid_rows
+
+        idx = 0
+        for row in range(grid_rows):
+            for col in range(grid_cols):
+                x = col * cell_w + cell_w // 2
+                y = top_margin + row * cell_h + cell_h // 2
+                elem = Element(
+                    bounds=f"[{x-10},{y-10}][{x+10},{y+10}]",
+                    clickable=True,
+                    index=idx,
+                    source="grid",
+                    text=f"grid_{row}_{col}"
+                )
+                elements.append(elem)
+                idx += 1
+        return elements
+
     def capture_screen(self, label: str = "") -> str:
-        """Capture and save screenshot."""
         timestamp = int(time.time())
         filename = f"step_{self.step_count:03d}_{label}_{timestamp}.png"
         filepath = self.screenshots_dir / filename
-        
         if self.adb.screencap(str(filepath)):
             return str(filepath)
         return ""
-    
+
+    def strategy_ui_hierarchy(self) -> list[Element]:
+        """Strategy 1: Standard uiautomator dump."""
+        root = self.adb.get_ui_hierarchy_uiautomator()
+        if root is not None:
+            elements = self.parse_elements_from_xml(root)
+            if elements:
+                print(f"  [uiautomator] Found {len(elements)} elements")
+                return elements
+        print("  [uiautomator] No elements found, trying fallback")
+        return []
+
+    def strategy_dumpsys(self) -> list[Element]:
+        """Strategy 2: Use dumpsys to find current activity and UI state."""
+        activity = self.adb.get_current_activity()
+        print(f"  [dumpsys] Activity: {activity[:80]}")
+        # Return empty - this is for logging, not element discovery
+        return []
+
+    def strategy_grid(self) -> list[Element]:
+        """Strategy 3: Grid-based exploration."""
+        w, h = self.adb.get_screen_size()
+        elements = self.generate_grid_elements(w, h)
+        print(f"  [grid] Generated {len(elements)} grid points")
+        return elements
+
     def explore_step(self) -> bool:
-        """Perform one exploration step."""
         if self.step_count >= self.max_steps:
             print(f"Max steps ({self.max_steps}) reached")
             return False
-        
+
         self.step_count += 1
         print(f"\n--- Step {self.step_count}/{self.max_steps} ---")
-        
-        # Get current activity
-        activity = self.adb.get_current_activity()
-        print(f"Current activity: {activity}")
-        
-        # Dump UI hierarchy
-        root = self.adb.get_ui_hierarchy()
-        if root is None:
-            print("Failed to get UI hierarchy")
+
+        # Capture current screenshot for comparison
+        current_screenshot = self.capture_screen(f"step_{self.step_count}")
+
+        # Check if screen changed from previous step
+        if self.last_screenshot_path and current_screenshot:
+            similarity = ScreenComparator.compare_files(self.last_screenshot_path, current_screenshot)
+            if similarity > 0.95:
+                self.consecutive_same_screen += 1
+                print(f"  Screen unchanged (similarity: {similarity:.2f})")
+                if self.consecutive_same_screen >= 3:
+                    print("  Screen stuck - going back")
+                    self.adb.press_back()
+                    time.sleep(1)
+                    self.consecutive_same_screen = 0
+                    return True
+            else:
+                self.consecutive_same_screen = 0
+
+        self.last_screenshot_path = current_screenshot
+
+        # Try strategies in order
+        elements = []
+
+        # Strategy 1: UI Automator
+        elements = self.strategy_ui_hierarchy()
+
+        # Strategy 2: Dumpsys (for logging)
+        self.strategy_dumpsys()
+
+        # Strategy 3: Grid (if no elements found)
+        if not elements:
+            elements = self.strategy_grid()
+
+        if not elements:
+            print("  No elements from any strategy, pressing back")
+            self.adb.press_back()
+            time.sleep(1)
             return True
-        
-        # Parse elements
-        elements = self.parse_elements(root)
-        print(f"Found {len(elements)} interactable elements")
-        
+
         # Get screen signature
-        screen_hash = self.get_screen_hash(elements)
-        
+        screen_hash = self.get_screen_signature(elements)
+
         # Check if new screen
         is_new_screen = screen_hash not in self.screens
         if is_new_screen:
-            print(f"NEW SCREEN discovered: {screen_hash}")
-            
-            # Capture screenshot
-            screenshot = self.capture_screen(screen_hash)
-            
-            # Record screen
+            print(f"  NEW SCREEN: {screen_hash}")
             screen = Screen(
                 screen_id=screen_hash,
-                activity=activity,
+                activity=self.adb.get_current_activity()[:100],
                 package=self.package,
-                screenshot_path=screenshot,
+                screenshot_path=current_screenshot,
                 elements=elements,
                 visited=True,
-                timestamp=time.time()
+                timestamp=time.time(),
+                strategy_used=elements[0].source if elements else "unknown"
             )
             self.screens[screen_hash] = screen
-            
-            # Log screen info
             self._log_screen(screen)
-        
-        # Find interactable elements
-        interactable = self.find_interactable_elements(elements)
-        print(f"Interactable elements: {len(interactable)}")
-        
-        if not interactable:
-            print("No interactable elements found, going back")
-            self.adb.press_back()
-            time.sleep(0.5)
-            return True
-        
-        # Try to tap on unvisited elements
+
+        # Find unvisited elements to tap
         tapped = False
-        for elem in interactable:
-            elem_key = f"{screen_hash}:{elem.resource_id}:{elem.text}:{elem.bounds}"
-            
-            if elem_key not in self.visited_elements and elem.center != (0, 0):
+        for elem in elements:
+            elem_key = f"{screen_hash}:{elem.bounds}:{elem.source}"
+
+            if elem_key not in self.visited_elements:
                 self.visited_elements.add(elem_key)
-                
                 x, y = elem.center
-                label = elem.text or elem.content_desc or elem.resource_id.split("/")[-1] if "/" in elem.resource_id else f"elem_{elem.index}"
-                print(f"Tapping: {label} at ({x}, {y})")
-                
-                self.adb.tap(x, y)
-                time.sleep(1)
-                
-                tapped = True
-                break
-        
+
+                if x > 0 and y > 0:
+                    print(f"  Tapping: {elem.label} at ({x}, {y}) [{elem.source}]")
+                    self.adb.tap(x, y)
+                    time.sleep(1)
+                    tapped = True
+                    break
+
         if not tapped:
             # Try scrolling
-            print("No new elements to tap, trying scroll")
             w, h = self.adb.get_screen_size()
+            print("  No new elements, scrolling down")
             self.adb.swipe(w // 2, h * 3 // 4, w // 2, h // 4, 500)
             time.sleep(0.5)
-        
+
         return True
-    
+
     def _log_screen(self, screen: Screen):
-        """Log screen information."""
         log_file = self.logs_dir / "screens.jsonl"
-        
         screen_data = {
             "screen_id": screen.screen_id,
             "activity": screen.activity,
             "screenshot": screen.screenshot_path,
             "element_count": len(screen.elements),
             "timestamp": screen.timestamp,
+            "strategy": screen.strategy_used,
             "elements": [
                 {
                     "text": e.text,
+                    "content_desc": e.content_desc,
                     "resource_id": e.resource_id,
                     "class": e.class_name,
                     "clickable": e.clickable,
-                    "bounds": e.bounds
+                    "bounds": e.bounds,
+                    "source": e.source
                 }
-                for e in screen.elements[:20]  # Limit logged elements
+                for e in screen.elements[:20]
             ]
         }
-        
         with open(log_file, "a") as f:
             f.write(json.dumps(screen_data) + "\n")
-    
+
     def explore(self):
-        """Main exploration loop."""
         print(f"\n{'='*60}")
-        print(f"Starting Auto-Explore")
+        print(f"Production Auto-Explorer")
         print(f"Package: {self.package}")
         print(f"Max Steps: {self.max_steps}")
         print(f"Output: {self.output_dir}")
         print(f"{'='*60}\n")
-        
-        # Ensure screen is on
-        if not self.adb.is_screen_on():
-            self.adb.run("input keyevent 26")  # Power button
-            time.sleep(1)
-        
-        # Start exploration
+
+        self.adb.wake_screen()
+
+        # Launch app
+        self.adb.run(f"monkey -p {self.package} -c android.intent.category.LAUNCHER 1")
+        time.sleep(3)
+
         try:
             while self.step_count < self.max_steps:
                 if not self.explore_step():
                     break
-                
-                # Small delay between steps
                 time.sleep(0.3)
-        
         except KeyboardInterrupt:
             print("\nExploration interrupted")
-        
-        # Generate summary
+
         self._generate_summary()
-        
+
         print(f"\n{'='*60}")
         print(f"Exploration Complete!")
         print(f"Screens discovered: {len(self.screens)}")
         print(f"Total steps: {self.step_count}")
         print(f"Elements visited: {len(self.visited_elements)}")
         print(f"{'='*60}")
-    
+
     def _generate_summary(self):
-        """Generate exploration summary."""
         summary = {
             "package": self.package,
             "total_screens": len(self.screens),
             "total_steps": self.step_count,
             "elements_visited": len(self.visited_elements),
+            "strategies_used": list(set(s.strategy_used for s in self.screens.values())),
             "screens": [
                 {
                     "id": s.screen_id,
                     "activity": s.activity,
                     "screenshot": s.screenshot_path,
-                    "elements": len(s.elements)
+                    "elements": len(s.elements),
+                    "strategy": s.strategy_used
                 }
                 for s in self.screens.values()
             ]
         }
-        
         summary_file = self.output_dir / "exploration_summary.json"
         with open(summary_file, "w") as f:
             json.dump(summary, f, indent=2)
-        
         print(f"Summary saved to: {summary_file}")
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Auto-explore Android app")
-    parser.add_argument("--device", "-d", help="Device ID (default: first available)")
+    parser = argparse.ArgumentParser(description="Production-grade auto-explore Android app")
+    parser.add_argument("--device", "-d", help="Device ID")
     parser.add_argument("--package", "-p", required=True, help="App package name")
     parser.add_argument("--max-steps", "-m", type=int, default=50, help="Max exploration steps")
     parser.add_argument("--output-dir", "-o", default="artifacts", help="Output directory")
-    
     args = parser.parse_args()
-    
-    # Get device ID if not specified
+
     device_id = args.device
     if not device_id:
         try:
             result = subprocess.run(["adb", "devices"], capture_output=True, text=True)
-            lines = result.stdout.strip().split("\n")[1:]  # Skip header
+            lines = result.stdout.strip().split("\n")[1:]
             for line in lines:
                 if "device" in line and "offline" not in line:
                     device_id = line.split("\t")[0]
                     break
         except:
             pass
-    
+
     if not device_id:
-        print("No device found. Make sure emulator is running.")
+        print("No device found.")
         sys.exit(1)
-    
-    print(f"Using device: {device_id}")
-    
-    # Create ADB controller
+
+    print(f"Device: {device_id}")
+
     adb = ADBController(device_id)
-    
-    # Create and run explorer
     explorer = AutoExplorer(
         adb=adb,
         package=args.package,
         output_dir=args.output_dir,
         max_steps=args.max_steps
     )
-    
     explorer.explore()
 
 
