@@ -6,8 +6,10 @@ Works with Flutter, React Native, and native Android apps.
 """
 
 import argparse
+import base64
 import hashlib
 import io
+import json
 import os
 import subprocess
 import sys
@@ -18,6 +20,7 @@ import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
+from urllib.request import Request, urlopen
 
 try:
     from PIL import Image
@@ -294,12 +297,16 @@ class AutoExplorer:
     def _start_ws(self):
         ws_url = self.server_url.replace("https://", "wss://").replace("http://", "ws://") + "/ws/device"
         self._ws_running = True
+        self._ws_connected = False
+        print(f"  [ws] Connecting to {ws_url}")
         def _run():
             while self._ws_running:
                 try:
                     import websocket
                     ws = websocket.WebSocket()
                     ws.connect(ws_url, timeout=10)
+                    self._ws_connected = True
+                    print(f"  [ws] Connected")
                     ws.settimeout(5)
                     while self._ws_running:
                         try:
@@ -313,8 +320,11 @@ class AutoExplorer:
                             except:
                                 break
                     ws.close()
+                    self._ws_connected = False
                 except Exception as e:
                     if self._ws_running:
+                        print(f"  [ws] Failed: {e}, retry 3s")
+                        self._ws_connected = False
                         time.sleep(3)
         self._ws_thread = threading.Thread(target=_run, daemon=True)
         self._ws_thread.start()
@@ -352,6 +362,8 @@ class AutoExplorer:
                 payload.extend(len(step_str).to_bytes(2, "big"))
                 payload.extend(step_str)
                 payload.extend(jpeg_data)
+                if not self._ws_connected:
+                    continue
                 try:
                     self.ws_queue.put(bytes(payload), timeout=1)
                 except:
@@ -443,19 +455,33 @@ class AutoExplorer:
                 ratio = max_height / img.height
                 new_width = int(img.width * ratio)
                 img = img.resize((new_width, max_height), Image.LANCZOS)
-            buffer = io.BytesIO()
-            img.convert("RGB").save(buffer, format="JPEG", quality=85, optimize=True)
-            payload = bytearray()
-            device_bytes = self.device_label.encode()
-            payload.extend(len(device_bytes).to_bytes(2, "big"))
-            payload.extend(device_bytes)
-            step_bytes = str(self.step_count).encode()
-            payload.extend(len(step_bytes).to_bytes(2, "big"))
-            payload.extend(step_bytes)
-            payload.extend(buffer.getvalue())
-            self.ws_queue.put(bytes(payload))
+            if self._ws_connected:
+                buffer = io.BytesIO()
+                img.convert("RGB").save(buffer, format="JPEG", quality=85, optimize=True)
+                payload = bytearray()
+                device_bytes = self.device_label.encode()
+                payload.extend(len(device_bytes).to_bytes(2, "big"))
+                payload.extend(device_bytes)
+                step_bytes = str(self.step_count).encode()
+                payload.extend(len(step_bytes).to_bytes(2, "big"))
+                payload.extend(step_bytes)
+                payload.extend(buffer.getvalue())
+                self.ws_queue.put(bytes(payload))
+            else:
+                self._send_http_fallback(img)
         except Exception as e:
             print(f"  [stream] Error: {e}")
+
+    def _send_http_fallback(self, img):
+        try:
+            buffer = io.BytesIO()
+            img.convert("RGB").save(buffer, format="JPEG", quality=60, optimize=True)
+            b64 = base64.b64encode(buffer.getvalue()).decode()
+            data = json.dumps({"image": b64, "step": self.step_count, "device_id": self.device_label}).encode()
+            req = Request(f"{self.server_url}/api/screenshot", data=data, headers={"Content-Type": "application/json"})
+            urlopen(req, timeout=5)
+        except Exception as e:
+            print(f"  [stream] HTTP fallback error: {e}")
 
     def strategy_ui_hierarchy(self) -> list[Element]:
         """Strategy 1: Standard uiautomator dump."""
