@@ -28,4 +28,5 @@ build/
 
 # APK files (don't commit large binaries)
 *.apk
+!dummy-a11y/*.apk
 *.aab

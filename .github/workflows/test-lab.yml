@@ -121,7 +121,7 @@ jobs:
             wget -q "${{ inputs.apk_url }}" -O app.apk
             adb install app.apk
             sleep 2
-            if [ "${{ matrix.api-level }}" -ge 31 ]; then adb install dummy-a11y/dummy-a11y.apk && adb shell settings put secure enabled_accessibility_services com.a11y.dummy/com.a11y.dummy.DummyAccessibilityService && adb shell settings put secure accessibility_enabled 1 && adb shell am force-stop "${{ inputs.package_name }}" && sleep 2; fi
+            if [ "${{ matrix.api-level }}" -ge 31 ]; then adb install dummy-a11y/dummy-a11y.apk; adb shell settings put secure enabled_accessibility_services com.a11y.dummy/com.a11y.dummy.DummyAccessibilityService; adb shell settings put secure accessibility_enabled 1; adb shell am force-stop "${{ inputs.package_name }}"; sleep 2; fi
             adb shell monkey -p "${{ inputs.package_name }}" -c android.intent.category.LAUNCHER 1
             sleep 3
             python scripts/auto_explore.py --device "auto" --package "${{ inputs.package_name }}" --max-steps 50 --output-dir artifacts --server "$TUNNEL_URL" --device-label "${{ matrix.device }}-api${{ matrix.api-level }}"
