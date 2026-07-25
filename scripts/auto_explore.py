@@ -374,8 +374,8 @@ class AutoExplorer:
             data = json.dumps({"image": b64, "step": self.step_count, "device_id": self.device_label}).encode()
             req = Request(f"{self.server_url}/api/screenshot", data=data, headers={"Content-Type": "application/json"})
             urlopen(req, timeout=5)
-        except:
-            pass
+        except Exception as e:
+            print(f"  [stream] Send error: {e}")
 
     def strategy_ui_hierarchy(self) -> list[Element]:
         """Strategy 1: Standard uiautomator dump."""
@@ -423,6 +423,8 @@ class AutoExplorer:
 
         self.step_count += 1
         print(f"\n--- Step {self.step_count}/{self.max_steps} ---")
+
+        self.adb.wake_screen()
 
         if not self.is_in_target_app():
             self.consecutive_out_of_app += 1
