@@ -33,7 +33,7 @@ jobs:
           sleep 2
           curl -Ls https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o cloudflared
           chmod +x cloudflared
-          ./cloudflared tunnel --url http://localhost:8765 > tunnel.log 2>&1 &
+          ./cloudflared tunnel --url http://localhost:8765 --heartbeat-interval 30s > tunnel.log 2>&1 &
           sleep 10
           TUNNEL_URL=$(grep -oP 'https://[a-z0-9-]+\.trycloudflare\.com' tunnel.log | head -1)
           echo "$TUNNEL_URL" > tunnel_url.txt

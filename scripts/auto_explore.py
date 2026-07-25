@@ -359,6 +359,7 @@ class AutoExplorer:
     def _send_screenshot(self, filepath: str):
         if not self.server_url:
             return
+        data_bytes = None
         try:
             with open(filepath, "rb") as f:
                 img_data = f.read()
@@ -371,11 +372,21 @@ class AutoExplorer:
             buffer = io.BytesIO()
             img.convert("RGB").save(buffer, format="JPEG", quality=50, optimize=True)
             b64 = base64.b64encode(buffer.getvalue()).decode("utf-8")
-            data = json.dumps({"image": b64, "step": self.step_count, "device_id": self.device_label}).encode()
-            req = Request(f"{self.server_url}/api/screenshot", data=data, headers={"Content-Type": "application/json"})
-            urlopen(req, timeout=5)
+            data_bytes = json.dumps({"image": b64, "step": self.step_count, "device_id": self.device_label}).encode()
         except Exception as e:
-            print(f"  [stream] Send error: {e}")
+            print(f"  [stream] Encode error: {e}")
+            return
+
+        for attempt in range(3):
+            try:
+                req = Request(f"{self.server_url}/api/screenshot", data=data_bytes, headers={"Content-Type": "application/json"})
+                urlopen(req, timeout=5)
+                return
+            except Exception as e:
+                if attempt < 2:
+                    time.sleep(2)
+                if attempt == 2:
+                    print(f"  [stream] Failed after 3 attempts: {e}")
 
     def strategy_ui_hierarchy(self) -> list[Element]:
         """Strategy 1: Standard uiautomator dump."""
@@ -442,6 +453,18 @@ class AutoExplorer:
 
         elements = self.strategy_ui_hierarchy()
         self.strategy_dumpsys()
+
+        if not elements:
+            for retry in range(3):
+                activity = self.adb.get_current_activity()
+                if self.package in activity:
+                    print(f"  [retry] uiautomator empty, waiting... ({retry+1}/3)")
+                    time.sleep(2)
+                    elements = self.strategy_ui_hierarchy()
+                    if elements:
+                        break
+                else:
+                    break
 
         if not elements:
             elements = self.strategy_grid()
