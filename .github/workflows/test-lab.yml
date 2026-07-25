@@ -22,9 +22,9 @@ on:
           - deep
 
 jobs:
-  monitor:
+  monitor-start:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 5
     outputs:
       tunnel_url: ${{ steps.tunnel.outputs.url }}
 
@@ -41,10 +41,7 @@ jobs:
         run: pip install -r monitor/requirements.txt
 
       - name: Start Monitor Server
-        run: |
-          python monitor/server.py &
-          sleep 3
-          echo "Monitor server started"
+        run: python monitor/server.py &
 
       - name: Start Cloudflare Tunnel
         id: tunnel
@@ -55,15 +52,19 @@ jobs:
           sleep 10
           TUNNEL_URL=$(grep -oP 'https://[a-z0-9-]+\.trycloudflare\.com' tunnel.log | head -1)
           echo "url=$TUNNEL_URL" >> $GITHUB_OUTPUT
-          echo "Tunnel URL: $TUNNEL_URL"
+          echo "Dashboard URL: $TUNNEL_URL"
 
-      - name: Wait for tests to complete
-        run: |
-          echo "Monitor running. Waiting for test jobs..."
-          sleep 3600
+  monitor-keepalive:
+    needs: monitor-start
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Keep tunnel alive
+        run: sleep 3600
 
   test:
-    needs: monitor
+    needs: monitor-start
     runs-on: ubuntu-latest
     timeout-minutes: 60
     strategy:
@@ -109,22 +110,21 @@ jobs:
           script: |
             mkdir -p artifacts/screenshots artifacts/reports artifacts/logs
             DEVICE_ID=$(adb devices | grep emulator | awk '{print $1}')
+            MONITOR_URL="${{ needs.monitor-start.outputs.tunnel_url }}"
             echo "Device: $DEVICE_ID"
-            echo "Monitor URL: ${{ needs.monitor.outputs.tunnel_url }}"
+            echo "Monitor: $MONITOR_URL"
 
             pip install Pillow
 
             # Start streamer in background
-            python monitor/streamer.py \
-              --server "${{ needs.monitor.outputs.tunnel_url }}" \
+            (python monitor/streamer.py \
+              --server "$MONITOR_URL" \
               --device "$DEVICE_ID" \
               --device-name "${{ matrix.device }}" \
               --api-level "${{ matrix.api-level }}" \
               --screen-size "${{ matrix.screen }}" \
               --interval 3 \
-              --output-dir artifacts &
-            STREAMER_PID=$!
-            echo "Streamer PID: $STREAMER_PID"
+              --output-dir artifacts &) || true
 
             wget -q "${{ inputs.apk_url }}" -O app.apk
             adb install app.apk
@@ -133,9 +133,6 @@ jobs:
             sleep 3
             pip install -r scripts/requirements.txt
             python scripts/auto_explore.py --device "$DEVICE_ID" --package "${{ inputs.package_name }}" --max-steps "${{ inputs.test_depth == 'quick' && '15' || inputs.test_depth == 'deep' && '100' || '50' }}" --output-dir artifacts
-
-            kill $STREAMER_PID 2>/dev/null || true
-
             mkdir -p artifacts/screenshots/final
             adb exec-out screencap -p > artifacts/screenshots/final/final_screen.png
             python scripts/generate_report.py --input-dir artifacts --output-dir artifacts/reports --package "${{ inputs.package_name }}" --device "${{ matrix.device }}" --api-level "${{ matrix.api-level }}" --screen "${{ matrix.screen }}"
