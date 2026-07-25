@@ -66,59 +66,18 @@ jobs:
           emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -no-snapshot
           disable-animations: true
           script: |
-            set -e
-            
-            echo "=== Emulator Info ==="
-            adb wait-for-device
-            adb shell getprop ro.build.version.sdk
-            adb shell wm size
-            adb shell wm density
-            
-            echo "=== Creating directories ==="
             mkdir -p artifacts/screenshots artifacts/reports artifacts/logs
-            
-            echo "=== Downloading APK ==="
             wget -q "${{ inputs.apk_url }}" -O app.apk
-            ls -lh app.apk
-            
-            echo "=== Installing APK ==="
             adb install app.apk
             sleep 2
-            
-            echo "=== Launching App ==="
-            PACKAGE="${{ inputs.package_name }}"
-            adb shell am start -a android.intent.action.MAIN -c android.intent.category.LAUNCHER -n "${PACKAGE}/.MainActivity" || adb shell am start -a android.intent.action.MAIN -c android.intent.category.LAUNCHER -n "${PACKAGE}/MainActivity" || adb shell am start "${PACKAGE}"
+            adb shell monkey -p "${{ inputs.package_name }}" -c android.intent.category.LAUNCHER 1
             sleep 3
-            
-            echo "=== Running Auto-Explore ==="
             pip install -r scripts/requirements.txt
-            python scripts/auto_explore.py \
-              --device "$(adb devices | grep emulator | awk '{print $1}')" \
-              --package "$PACKAGE" \
-              --max-steps "${{ inputs.test_depth == 'quick' && '15' || inputs.test_depth == 'deep' && '100' || '50' }}" \
-              --output-dir artifacts
-            
-            echo "=== Capture Final Screenshot ==="
+            python scripts/auto_explore.py --device "$(adb devices | grep emulator | awk '{print $1}')" --package "${{ inputs.package_name }}" --max-steps "${{ inputs.test_depth == 'quick' && '15' || inputs.test_depth == 'deep' && '100' || '50' }}" --output-dir artifacts
             mkdir -p artifacts/screenshots/final
             adb exec-out screencap -p > artifacts/screenshots/final/final_screen.png
-            adb shell dumpsys window windows | grep -E "mCurrentFocus|mFocusedApp" > artifacts/logs/window_info.txt || true
-            adb shell dumpsys activity activities | head -50 > artifacts/logs/activity_info.txt || true
-            
-            echo "=== Generating Report ==="
-            python scripts/generate_report.py \
-              --input-dir artifacts \
-              --output-dir artifacts/reports \
-              --package "$PACKAGE" \
-              --device "${{ matrix.device }}" \
-              --api-level "${{ matrix.api-level }}" \
-              --screen "${{ matrix.screen }}"
-            
-            echo "=== Collecting Logs ==="
+            python scripts/generate_report.py --input-dir artifacts --output-dir artifacts/reports --package "${{ inputs.package_name }}" --device "${{ matrix.device }}" --api-level "${{ matrix.api-level }}" --screen "${{ matrix.screen }}"
             adb logcat -d > artifacts/logs/logcat_full.txt || true
-            adb shell dumpsys meminfo "$PACKAGE" > artifacts/logs/memory_info.txt || true
-            adb shell dumpsys cpuinfo > artifacts/logs/cpu_info.txt || true
-            
-            echo "=== Done ==="
 
       - name: Upload Test Results
         uses: actions/upload-artifact@v4
