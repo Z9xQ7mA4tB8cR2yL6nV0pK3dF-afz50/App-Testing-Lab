@@ -30,9 +30,20 @@ class ScreenshotStreamer:
         self.device_name = device_name
         self.api_level = api_level
         self.screen_size = screen_size
+
+        if not self.device_id or self.device_id == "auto":
+            try:
+                result = subprocess.run(["adb", "devices"], capture_output=True, text=True, timeout=5)
+                for line in result.stdout.strip().split("\n")[1:]:
+                    if "emulator" in line or "device" in line:
+                        self.device_id = line.split("\t")[0]
+                        break
+            except:
+                pass
+
         self.adb_cmd = ["adb"]
-        if device_id and device_id != "auto":
-            self.adb_cmd.extend(["-s", device_id])
+        if self.device_id and self.device_id != "auto":
+            self.adb_cmd.extend(["-s", self.device_id])
 
     def register(self):
         """Register device with monitor server."""
@@ -45,39 +56,32 @@ class ScreenshotStreamer:
         self._post("/api/device/register", data)
 
     def capture_screenshot_base64(self) -> str:
-        """Capture screenshot and return as low-quality base64 JPEG."""
         try:
-            # Capture raw screenshot
+            import tempfile
             cmd = self.adb_cmd + ["exec-out", "screencap", "-p"]
             result = subprocess.run(cmd, capture_output=True, timeout=10)
 
             if result.returncode != 0 or len(result.stdout) < 100:
-                # Fallback: file-based capture
-                self.adb_cmd + ["shell", "screencap", "-p", "/sdcard/monitor_tmp.png"]
-                subprocess.run(self.adb_cmd + ["shell", "screencap", "-p", "/sdcard/monitor_tmp.png"], capture_output=True, timeout=10)
-                time.sleep(0.3)
-                subprocess.run(self.adb_cmd + ["pull", "/sdcard/monitor_tmp.png", "/tmp/monitor_tmp.png"], capture_output=True, timeout=10)
-                with open("/tmp/monitor_tmp.png", "rb") as f:
+                tmp_local = os.path.join(tempfile.gettempdir(), "streamer_cap.png")
+                subprocess.run(self.adb_cmd + ["shell", "screencap", "-p", "/sdcard/streamer_cap.png"], capture_output=True, timeout=10)
+                time.sleep(0.5)
+                r = subprocess.run(self.adb_cmd + ["pull", "/sdcard/streamer_cap.png", tmp_local], capture_output=True, timeout=10)
+                if r.returncode != 0 or not os.path.exists(tmp_local) or os.path.getsize(tmp_local) < 100:
+                    return ""
+                with open(tmp_local, "rb") as f:
                     img_data = f.read()
-                subprocess.run(self.adb_cmd + ["shell", "rm", "/sdcard/monitor_tmp.png"], capture_output=True)
+                subprocess.run(self.adb_cmd + ["shell", "rm", "/sdcard/streamer_cap.png"], capture_output=True)
             else:
                 img_data = result.stdout
 
-            # Convert to low-quality JPEG
             img = Image.open(io.BytesIO(img_data))
-
-            # Resize for lower quality (max 360px height)
             max_height = 360
             if img.height > max_height:
                 ratio = max_height / img.height
                 new_width = int(img.width * ratio)
                 img = img.resize((new_width, max_height), Image.LANCZOS)
-
-            # Convert to JPEG with low quality
             buffer = io.BytesIO()
             img.convert("RGB").save(buffer, format="JPEG", quality=50, optimize=True)
-
-            # Encode to base64
             return base64.b64encode(buffer.getvalue()).decode("utf-8")
         except Exception as e:
             print(f"Screenshot error: {e}")

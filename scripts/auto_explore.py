@@ -277,7 +277,8 @@ class AutoExplorer:
 
     def get_screen_signature(self, elements: list[Element]) -> str:
         sig_parts = []
-        for e in elements[:15]:
+        sorted_elems = sorted(elements, key=lambda e: (e.bounds, e.text))
+        for e in sorted_elems[:15]:
             sig_parts.append(f"{e.class_name}:{e.text}:{e.content_desc}:{e.bounds}")
         return hashlib.md5("|".join(sig_parts).encode()).hexdigest()[:12]
 
@@ -405,25 +406,6 @@ class AutoExplorer:
 
         current_screenshot = self.capture_screen(f"step_{self.step_count}")
 
-        if self.last_screenshot_path and current_screenshot:
-            similarity = ScreenComparator.compare_files(self.last_screenshot_path, current_screenshot)
-            if similarity > 0.95:
-                self.consecutive_same_screen += 1
-                print(f"  Screen unchanged (similarity: {similarity:.2f}, stuck: {self.consecutive_same_screen}/3)")
-                if self.consecutive_same_screen >= 3:
-                    self.adb.press_back()
-                    time.sleep(1)
-                    if not self.is_in_target_app():
-                        self.relaunch_app()
-                    else:
-                        self.visited_elements.clear()
-                        self.consecutive_same_screen = 0
-                    return True
-            else:
-                self.consecutive_same_screen = 0
-
-        self.last_screenshot_path = current_screenshot
-
         elements = self.strategy_ui_hierarchy()
         self.strategy_dumpsys()
 
@@ -437,10 +419,26 @@ class AutoExplorer:
 
         screen_hash = self.get_screen_signature(elements)
 
+        if screen_hash == self.last_screen_hash:
+            self.consecutive_same_screen += 1
+            print(f"  Same elements as before (stuck: {self.consecutive_same_screen}/3)")
+            if self.consecutive_same_screen >= 3:
+                self.adb.press_back()
+                time.sleep(1)
+                if not self.is_in_target_app():
+                    self.relaunch_app()
+                else:
+                    self.consecutive_same_screen = 0
+                return True
+        else:
+            self.consecutive_same_screen = 0
+
+        self.last_screen_hash = screen_hash
+
         is_new_screen = screen_hash not in self.screens
         if is_new_screen:
             print(f"  NEW SCREEN: {screen_hash}")
-            screen = Screen(
+            self.screens[screen_hash] = Screen(
                 screen_id=screen_hash,
                 activity=self.adb.get_current_activity()[:100],
                 package=self.package,
@@ -450,8 +448,6 @@ class AutoExplorer:
                 timestamp=time.time(),
                 strategy_used=elements[0].source if elements else "unknown"
             )
-            self.screens[screen_hash] = screen
-            self._log_screen(screen)
 
         tapped = False
         for elem in elements:
