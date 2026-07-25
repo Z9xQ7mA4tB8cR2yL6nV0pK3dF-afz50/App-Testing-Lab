@@ -312,7 +312,7 @@ class AutoExplorer:
                 except queue.Empty:
                     if conn:
                         try:
-                            conn.request("GET", "/")
+                            conn.request("GET", "/ping")
                             conn.getresponse().read()
                         except:
                             conn = None
