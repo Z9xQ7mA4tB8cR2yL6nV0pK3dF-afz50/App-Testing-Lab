@@ -283,10 +283,13 @@ class AutoExplorer:
         self.last_screenshot_path = ""
         self.grid_offset = 0
 
-        self.ws_queue = queue.Queue()
-        self._ws_thread = None
+        self.ws_queue = queue.Queue(maxsize=20)
+        self._ws_running = False
+        self._streaming = False
+        self._screencap_lock = threading.Lock()
         if self.server_url:
             self._start_ws()
+            self._start_streamer()
 
     def _start_ws(self):
         ws_url = self.server_url.replace("https://", "wss://").replace("http://", "ws://") + "/ws/device"
@@ -315,6 +318,46 @@ class AutoExplorer:
                         time.sleep(3)
         self._ws_thread = threading.Thread(target=_run, daemon=True)
         self._ws_thread.start()
+
+    def _start_streamer(self):
+        self._streaming = True
+        def _run():
+            tmp_file = str(self.screenshots_dir / "_stream_tmp.png")
+            while self._streaming:
+                time.sleep(1.5)
+                with self._screencap_lock:
+                    try:
+                        if not self.adb.screencap(tmp_file):
+                            continue
+                        with open(tmp_file, "rb") as f:
+                            img_data = f.read()
+                        img = Image.open(io.BytesIO(img_data))
+                        max_height = 720
+                        if img.height > max_height:
+                            ratio = max_height / img.height
+                            new_width = int(img.width * ratio)
+                            img = img.resize((new_width, max_height), Image.LANCZOS)
+                        buffer = io.BytesIO()
+                        img.convert("RGB").save(buffer, format="JPEG", quality=85, optimize=True)
+                        jpeg_data = buffer.getvalue()
+                        if os.path.exists(tmp_file):
+                            os.remove(tmp_file)
+                    except:
+                        continue
+                payload = bytearray()
+                device_bytes = self.device_label.encode()
+                payload.extend(len(device_bytes).to_bytes(2, "big"))
+                payload.extend(device_bytes)
+                step_str = f"s{self.step_count}".encode()
+                payload.extend(len(step_str).to_bytes(2, "big"))
+                payload.extend(step_str)
+                payload.extend(jpeg_data)
+                try:
+                    self.ws_queue.put(bytes(payload), timeout=1)
+                except:
+                    pass
+        self._streamer_thread = threading.Thread(target=_run, daemon=True)
+        self._streamer_thread.start()
 
     def get_screen_signature(self, elements: list[Element]) -> str:
         sig_parts = []
@@ -382,9 +425,10 @@ class AutoExplorer:
         timestamp = int(time.time())
         filename = f"step_{self.step_count:03d}_{label}_{timestamp}.png"
         filepath = self.screenshots_dir / filename
-        if self.adb.screencap(str(filepath)):
-            self._send_screenshot(filepath)
-            return str(filepath)
+        with self._screencap_lock:
+            if self.adb.screencap(str(filepath)):
+                self._send_screenshot(filepath)
+                return str(filepath)
         return ""
 
     def _send_screenshot(self, filepath: str):
@@ -602,6 +646,9 @@ class AutoExplorer:
             print("\nExploration interrupted")
 
         self._generate_summary()
+        self._streaming = False
+        self._ws_running = False
+        self.ws_queue.put(None)
 
         print(f"\n{'='*60}")
         print(f"Exploration Complete!")
