@@ -6,20 +6,18 @@ Works with Flutter, React Native, and native Android apps.
 """
 
 import argparse
-import base64
 import hashlib
 import io
-import json
 import os
 import subprocess
 import sys
 import time
+import threading
+import queue
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
-from urllib.request import Request, urlopen
-from urllib.error import URLError
 
 try:
     from PIL import Image
@@ -285,6 +283,39 @@ class AutoExplorer:
         self.last_screenshot_path = ""
         self.grid_offset = 0
 
+        self.ws_queue = queue.Queue()
+        self._ws_thread = None
+        if self.server_url:
+            self._start_ws()
+
+    def _start_ws(self):
+        ws_url = self.server_url.replace("https://", "wss://").replace("http://", "ws://") + "/ws/device"
+        self._ws_running = True
+        def _run():
+            while self._ws_running:
+                try:
+                    import websocket
+                    ws = websocket.WebSocket()
+                    ws.connect(ws_url, timeout=10)
+                    ws.settimeout(5)
+                    while self._ws_running:
+                        try:
+                            data = self.ws_queue.get(timeout=3)
+                            if data is None:
+                                break
+                            ws.send_binary(data)
+                        except queue.Empty:
+                            try:
+                                ws.ping()
+                            except:
+                                break
+                    ws.close()
+                except Exception as e:
+                    if self._ws_running:
+                        time.sleep(3)
+        self._ws_thread = threading.Thread(target=_run, daemon=True)
+        self._ws_thread.start()
+
     def get_screen_signature(self, elements: list[Element]) -> str:
         sig_parts = []
         sorted_elems = sorted(elements, key=lambda e: (e.class_name, e.bounds, e.text[:6]))
@@ -359,12 +390,6 @@ class AutoExplorer:
     def _send_screenshot(self, filepath: str):
         if not self.server_url:
             return
-        import threading
-        t = threading.Thread(target=self._do_send_screenshot, args=(filepath,), daemon=True)
-        t.start()
-
-    def _do_send_screenshot(self, filepath: str):
-        data_bytes = None
         try:
             with open(filepath, "rb") as f:
                 img_data = f.read()
@@ -376,22 +401,17 @@ class AutoExplorer:
                 img = img.resize((new_width, max_height), Image.LANCZOS)
             buffer = io.BytesIO()
             img.convert("RGB").save(buffer, format="JPEG", quality=85, optimize=True)
-            b64 = base64.b64encode(buffer.getvalue()).decode("utf-8")
-            data_bytes = json.dumps({"image": b64, "step": self.step_count, "device_id": self.device_label}).encode()
+            payload = bytearray()
+            device_bytes = self.device_label.encode()
+            payload.extend(len(device_bytes).to_bytes(2, "big"))
+            payload.extend(device_bytes)
+            step_bytes = str(self.step_count).encode()
+            payload.extend(len(step_bytes).to_bytes(2, "big"))
+            payload.extend(step_bytes)
+            payload.extend(buffer.getvalue())
+            self.ws_queue.put(bytes(payload))
         except Exception as e:
-            print(f"  [stream] Encode error: {e}")
-            return
-
-        for attempt in range(3):
-            try:
-                req = Request(f"{self.server_url}/api/screenshot", data=data_bytes, headers={"Content-Type": "application/json"})
-                urlopen(req, timeout=5)
-                return
-            except Exception as e:
-                if attempt < 2:
-                    time.sleep(2)
-                if attempt == 2:
-                    print(f"  [stream] Failed after 3 attempts: {e}")
+            print(f"  [stream] Error: {e}")
 
     def strategy_ui_hierarchy(self) -> list[Element]:
         """Strategy 1: Standard uiautomator dump."""

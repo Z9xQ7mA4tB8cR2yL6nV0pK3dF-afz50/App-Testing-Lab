@@ -168,6 +168,40 @@ async def websocket_endpoint(websocket: WebSocket):
         dashboard_clients.discard(websocket)
 
 
+@app.websocket("/ws/device")
+async def device_websocket(websocket: WebSocket):
+    await websocket.accept()
+    try:
+        while True:
+            data = await websocket.receive_bytes()
+            try:
+                pos = 0
+                dev_len = int.from_bytes(data[pos:pos+2], "big"); pos += 2
+                device_id = data[pos:pos+dev_len].decode(); pos += dev_len
+                step_len = int.from_bytes(data[pos:pos+2], "big"); pos += 2
+                step = data[pos:pos+step_len].decode(); pos += step_len
+                jpeg_data = data[pos:]
+                b64 = base64.b64encode(jpeg_data).decode()
+                if device_id not in device_states:
+                    device_states[device_id] = {
+                        "device_id": device_id, "api_level": "?",
+                        "device_name": device_id, "screen_size": "?",
+                        "status": "streaming", "last_update": time.time(),
+                        "step": int(step), "screens_found": 0
+                    }
+                device_states[device_id]["last_update"] = time.time()
+                device_states[device_id]["step"] = int(step)
+                device_states[device_id]["status"] = "streaming"
+                latest_screenshots[device_id] = b64
+                await broadcast_screenshot(device_id, b64, int(step), 0)
+            except Exception as e:
+                print(f"  [ws] Parse error: {e}")
+    except WebSocketDisconnect:
+        pass
+    except:
+        pass
+
+
 async def broadcast_screenshot(device_id: str, image_b64: str, step: int, screens_found: int):
     message = json.dumps({
         "type": "screenshot",
