@@ -208,43 +208,47 @@ class ScreenComparator:
 
     @staticmethod
     def compute_hash(image_path: str, region: str = "header") -> str:
-        """Compute perceptual hash of screenshot region."""
         try:
             with open(image_path, "rb") as f:
                 data = f.read()
-
-            # Simple file hash for screen comparison
-            # In production, use perceptual hashing (pHash, dHash)
             return hashlib.md5(data).hexdigest()[:16]
         except:
             return ""
 
     @staticmethod
     def compare_files(path1: str, path2: str) -> float:
-        """Compare two screenshot files. Returns similarity ratio 0-1."""
         try:
-            with open(path1, "rb") as f1, open(path2, "rb") as f2:
-                data1 = f1.read()
-                data2 = f2.read()
+            from PIL import Image
+            import numpy as np
 
-            if len(data1) == 0 or len(data2) == 0:
+            img1 = Image.open(path1).convert("RGB").resize((180, 320))
+            img2 = Image.open(path2).convert("RGB").resize((180, 320))
+
+            arr1 = np.array(img1, dtype=np.float32)
+            arr2 = np.array(img2, dtype=np.float32)
+
+            diff = np.abs(arr1 - arr2)
+            mean_diff = diff.mean()
+
+            if mean_diff < 2.0:
+                return 1.0
+            elif mean_diff < 10.0:
+                return 0.95
+            elif mean_diff < 30.0:
+                return 0.7
+            else:
+                return 0.3
+        except ImportError:
+            try:
+                with open(path1, "rb") as f1, open(path2, "rb") as f2:
+                    data1 = f1.read()
+                    data2 = f2.read()
+                if data1 == data2:
+                    return 1.0
+                size_ratio = min(len(data1), len(data2)) / max(len(data1), len(data2))
+                return size_ratio
+            except:
                 return 0.0
-
-            # Quick comparison: if files are identical
-            if data1 == data2:
-                return 1.0
-
-            # Size-based heuristic
-            size_ratio = min(len(data1), len(data2)) / max(len(data1), len(data2))
-
-            # Hash comparison
-            hash1 = hashlib.md5(data1).hexdigest()
-            hash2 = hashlib.md5(data2).hexdigest()
-
-            if hash1 == hash2:
-                return 1.0
-
-            return size_ratio
         except:
             return 0.0
 
@@ -266,8 +270,10 @@ class AutoExplorer:
         self.visited_elements: set = set()
         self.step_count = 0
         self.consecutive_same_screen = 0
+        self.consecutive_out_of_app = 0
         self.last_screen_hash = ""
         self.last_screenshot_path = ""
+        self.grid_offset = 0
 
     def get_screen_signature(self, elements: list[Element]) -> str:
         sig_parts = []
@@ -299,31 +305,35 @@ class AutoExplorer:
         return elements
 
     def generate_grid_elements(self, screen_width: int, screen_height: int) -> list[Element]:
-        """Strategy: Generate grid-based tap points for exploration."""
+        """Strategy: Generate grid-based tap points with randomized order."""
+        import random
         elements = []
-        # Skip status bar (top 8%) and nav bar (bottom 8%)
-        top_margin = int(screen_height * 0.08)
-        bottom_margin = int(screen_height * 0.92)
+        top_margin = int(screen_height * 0.10)
+        bottom_margin = int(screen_height * 0.85)
 
-        grid_cols = 4
-        grid_rows = 6
+        grid_cols = 3
+        grid_rows = 5
         cell_w = screen_width // grid_cols
         cell_h = (bottom_margin - top_margin) // grid_rows
 
-        idx = 0
+        all_points = []
         for row in range(grid_rows):
             for col in range(grid_cols):
                 x = col * cell_w + cell_w // 2
                 y = top_margin + row * cell_h + cell_h // 2
-                elem = Element(
-                    bounds=f"[{x-10},{y-10}][{x+10},{y+10}]",
-                    clickable=True,
-                    index=idx,
-                    source="grid",
-                    text=f"grid_{row}_{col}"
-                )
-                elements.append(elem)
-                idx += 1
+                all_points.append((x, y))
+
+        random.shuffle(all_points)
+
+        for idx, (x, y) in enumerate(all_points):
+            elem = Element(
+                bounds=f"[{x-15},{y-15}][{x+15},{y+15}]",
+                clickable=True,
+                index=idx,
+                source="grid",
+                text=f"grid_{idx}"
+            )
+            elements.append(elem)
         return elements
 
     def capture_screen(self, label: str = "") -> str:
@@ -359,6 +369,20 @@ class AutoExplorer:
         print(f"  [grid] Generated {len(elements)} grid points")
         return elements
 
+    def is_in_target_app(self) -> bool:
+        activity = self.adb.get_current_activity()
+        return self.package in activity
+
+    def relaunch_app(self):
+        print(f"  [recovery] Relaunching {self.package}")
+        self.adb.press_home()
+        time.sleep(0.5)
+        self.adb.run(f"monkey -p {self.package} -c android.intent.category.LAUNCHER 1")
+        time.sleep(3)
+        self.consecutive_same_screen = 0
+        self.consecutive_out_of_app = 0
+        self.visited_elements.clear()
+
     def explore_step(self) -> bool:
         if self.step_count >= self.max_steps:
             print(f"Max steps ({self.max_steps}) reached")
@@ -367,49 +391,52 @@ class AutoExplorer:
         self.step_count += 1
         print(f"\n--- Step {self.step_count}/{self.max_steps} ---")
 
-        # Capture current screenshot for comparison
+        if not self.is_in_target_app():
+            self.consecutive_out_of_app += 1
+            print(f"  [out of app] Not in {self.package} (count: {self.consecutive_out_of_app})")
+            if self.consecutive_out_of_app >= 2:
+                self.relaunch_app()
+            else:
+                self.adb.press_back()
+                time.sleep(1)
+            return True
+        else:
+            self.consecutive_out_of_app = 0
+
         current_screenshot = self.capture_screen(f"step_{self.step_count}")
 
-        # Check if screen changed from previous step
         if self.last_screenshot_path and current_screenshot:
             similarity = ScreenComparator.compare_files(self.last_screenshot_path, current_screenshot)
             if similarity > 0.95:
                 self.consecutive_same_screen += 1
-                print(f"  Screen unchanged (similarity: {similarity:.2f})")
+                print(f"  Screen unchanged (similarity: {similarity:.2f}, stuck: {self.consecutive_same_screen}/3)")
                 if self.consecutive_same_screen >= 3:
-                    print("  Screen stuck - going back")
                     self.adb.press_back()
                     time.sleep(1)
-                    self.consecutive_same_screen = 0
+                    if not self.is_in_target_app():
+                        self.relaunch_app()
+                    else:
+                        self.visited_elements.clear()
+                        self.consecutive_same_screen = 0
                     return True
             else:
                 self.consecutive_same_screen = 0
 
         self.last_screenshot_path = current_screenshot
 
-        # Try strategies in order
-        elements = []
-
-        # Strategy 1: UI Automator
         elements = self.strategy_ui_hierarchy()
-
-        # Strategy 2: Dumpsys (for logging)
         self.strategy_dumpsys()
 
-        # Strategy 3: Grid (if no elements found)
         if not elements:
             elements = self.strategy_grid()
 
         if not elements:
-            print("  No elements from any strategy, pressing back")
             self.adb.press_back()
             time.sleep(1)
             return True
 
-        # Get screen signature
         screen_hash = self.get_screen_signature(elements)
 
-        # Check if new screen
         is_new_screen = screen_hash not in self.screens
         if is_new_screen:
             print(f"  NEW SCREEN: {screen_hash}")
@@ -426,7 +453,6 @@ class AutoExplorer:
             self.screens[screen_hash] = screen
             self._log_screen(screen)
 
-        # Find unvisited elements to tap
         tapped = False
         for elem in elements:
             elem_key = f"{screen_hash}:{elem.bounds}:{elem.source}"
@@ -443,7 +469,6 @@ class AutoExplorer:
                     break
 
         if not tapped:
-            # Try scrolling
             w, h = self.adb.get_screen_size()
             print("  No new elements, scrolling down")
             self.adb.swipe(w // 2, h * 3 // 4, w // 2, h // 4, 500)
