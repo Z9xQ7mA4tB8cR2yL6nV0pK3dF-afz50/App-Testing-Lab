@@ -369,13 +369,13 @@ class AutoExplorer:
             with open(filepath, "rb") as f:
                 img_data = f.read()
             img = Image.open(io.BytesIO(img_data))
-            max_height = 480
+            max_height = 720
             if img.height > max_height:
                 ratio = max_height / img.height
                 new_width = int(img.width * ratio)
                 img = img.resize((new_width, max_height), Image.LANCZOS)
             buffer = io.BytesIO()
-            img.convert("RGB").save(buffer, format="JPEG", quality=65, optimize=True)
+            img.convert("RGB").save(buffer, format="JPEG", quality=85, optimize=True)
             b64 = base64.b64encode(buffer.getvalue()).decode("utf-8")
             data_bytes = json.dumps({"image": b64, "step": self.step_count, "device_id": self.device_label}).encode()
         except Exception as e:
