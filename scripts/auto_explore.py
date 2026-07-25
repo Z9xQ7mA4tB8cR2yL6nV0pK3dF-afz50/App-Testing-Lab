@@ -8,11 +8,9 @@ Works with Flutter, React Native, and native Android apps.
 import argparse
 import base64
 import hashlib
-import http.client
 import io
 import json
 import os
-import ssl
 import subprocess
 import sys
 import time
@@ -22,6 +20,7 @@ import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
+from urllib.request import Request, urlopen
 
 try:
     from PIL import Image
@@ -294,41 +293,26 @@ class AutoExplorer:
             self._start_sender()
             self._start_streamer()
 
-    def _get_http_conn(self):
-        from urllib.parse import urlparse
-        p = urlparse(self.server_url)
-        ctx = ssl.create_default_context()
-        return http.client.HTTPSConnection(p.hostname, p.port or 443, context=ctx, timeout=10)
-
     def _start_sender(self):
         self._sender_running = True
         def _run():
-            conn = None
             while self._sender_running:
                 try:
                     data = self._send_queue.get(timeout=2)
                     if data is None:
                         break
                 except queue.Empty:
-                    if conn:
-                        try:
-                            conn.request("GET", "/ping")
-                            conn.getresponse().read()
-                        except:
-                            conn = None
                     continue
-                for attempt in range(2):
+                for attempt in range(3):
                     try:
-                        if conn is None:
-                            conn = self._get_http_conn()
-                        conn.request("POST", "/api/screenshot", body=data, headers={"Content-Type": "application/json"})
-                        resp = conn.getresponse()
-                        resp.read()
+                        req = Request(f"{self.server_url}/api/screenshot", data=data, headers={"Content-Type": "application/json"})
+                        urlopen(req, timeout=5)
                         break
-                    except:
-                        conn = None
-                        if attempt == 1:
-                            time.sleep(3)
+                    except Exception as e:
+                        if attempt == 2:
+                            print(f"  [send] Failed: {e}")
+                        else:
+                            time.sleep(2)
         self._sender_thread = threading.Thread(target=_run, daemon=True)
         self._sender_thread.start()
 
