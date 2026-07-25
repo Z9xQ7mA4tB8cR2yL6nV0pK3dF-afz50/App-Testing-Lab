@@ -31,11 +31,9 @@ jobs:
         run: |
           python monitor/server.py &
           sleep 2
-          curl -Ls https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o cloudflared
-          chmod +x cloudflared
-          ./cloudflared tunnel --url http://localhost:8765 --heartbeat-interval 30s > tunnel.log 2>&1 &
-          sleep 10
-          TUNNEL_URL=$(grep -oP 'https://[a-z0-9-]+\.trycloudflare\.com' tunnel.log | head -1)
+          ssh -o StrictHostKeyChecking=no -o ServerAliveInterval=30 -R 80:localhost:8765 nokey@localhost.run > tunnel.log 2>&1 &
+          sleep 15
+          TUNNEL_URL=$(grep -oP 'https://[a-z0-9-]+\.(lhr\.(life|domains)|localhost\.run)' tunnel.log | head -1)
           echo "$TUNNEL_URL" > tunnel_url.txt
           echo "Dashboard: $TUNNEL_URL"
       - uses: actions/upload-artifact@v4
