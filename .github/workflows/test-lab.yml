@@ -8,7 +8,7 @@ on:
         required: true
         type: string
       package_name:
-        description: 'Package name (e.g., com.example.app)'
+        description: 'Package name'
         required: true
         type: string
       test_depth:
@@ -19,6 +19,34 @@ on:
         options: [quick, normal, deep]
 
 jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.11' }
+      - run: pip install -r monitor/requirements.txt -q
+      - name: Start server + tunnel
+        run: |
+          python monitor/server.py &
+          sleep 2
+          curl -Ls https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o cloudflared
+          chmod +x cloudflared
+          ./cloudflared tunnel --url http://localhost:8765 > tunnel.log 2>&1 &
+          sleep 10
+          TUNNEL_URL=$(grep -oP 'https://[a-z0-9-]+\.trycloudflare\.com' tunnel.log | head -1)
+          echo "$TUNNEL_URL" > tunnel_url.txt
+          echo "Dashboard: $TUNNEL_URL"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tunnel-url
+          path: tunnel_url.txt
+          retention-days: 1
+          overwrite: true
+      - name: Keep alive
+        run: sleep 3600
+
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -44,6 +72,23 @@ jobs:
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
+      - name: Wait for tunnel URL
+        run: |
+          echo "Waiting for monitor tunnel..."
+          for i in $(seq 1 60); do
+            if gh run download -n tunnel-url -D tmp 2>/dev/null; then
+              TUNNEL_URL=$(cat tmp/tunnel_url.txt)
+              if [ -n "$TUNNEL_URL" ]; then
+                echo "TUNNEL_URL=$TUNNEL_URL" >> $GITHUB_ENV
+                echo "Got: $TUNNEL_URL"
+                break
+              fi
+            fi
+            echo "Attempt $i/60..."
+            sleep 10
+          done
+        env:
+          GH_TOKEN: ${{ github.token }}
       - uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: ${{ matrix.api-level }}
@@ -54,52 +99,21 @@ jobs:
           script: |
             mkdir -p artifacts/screenshots artifacts/reports artifacts/logs
             pip install Pillow -q
-            pip install -r monitor/requirements.txt -q
             pip install -r scripts/requirements.txt -q
-
-            # Start monitor server
-            python monitor/server.py &
-            SERVER_PID=$!
-            sleep 2
-
-            # Start tunnel
-            curl -Ls https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o cloudflared
-            chmod +x cloudflared
-            ./cloudflared tunnel --url http://localhost:8765 > tunnel.log 2>&1 &
-            sleep 10
-            TUNNEL_URL=$(grep -oP 'https://[a-z0-9-]+\.trycloudflare\.com' tunnel.log | head -1)
-            echo "Dashboard: $TUNNEL_URL"
-
-            # Wait for device
             adb wait-for-device
             sleep 5
             DEVICE_ID=$(adb devices | grep emulator | awk '{print $1}')
             echo "Device: $DEVICE_ID"
-
-            # Start streamer
             python monitor/streamer.py --server "$TUNNEL_URL" --device "$DEVICE_ID" --device-name "${{ matrix.device }}" --api-level "${{ matrix.api-level }}" --screen-size "${{ matrix.screen }}" --interval 3 --output-dir artifacts &
-            sleep 2
-
-            # Install and launch app
             wget -q "${{ inputs.apk_url }}" -O app.apk
             adb install app.apk
             sleep 2
             adb shell monkey -p "${{ inputs.package_name }}" -c android.intent.category.LAUNCHER 1
             sleep 3
-
-            # Run auto-explore
             python scripts/auto_explore.py --device "$DEVICE_ID" --package "${{ inputs.package_name }}" --max-steps 50 --output-dir artifacts
-
-            # Final screenshot
-            mkdir -p artifacts/screenshots/final
-            adb exec-out screencap -p > artifacts/screenshots/final/final_screen.png
-
-            # Generate report
+            adb exec-out screencap -p > artifacts/screenshots/final_screen.png
             python scripts/generate_report.py --input-dir artifacts --output-dir artifacts/reports --package "${{ inputs.package_name }}" --device "${{ matrix.device }}" --api-level "${{ matrix.api-level }}" --screen "${{ matrix.screen }}"
-
-            # Save logs
             adb logcat -d > artifacts/logs/logcat_full.txt || true
-            echo "TUNNEL_URL=$TUNNEL_URL" >> artifacts/tunnel_url.txt
       - uses: actions/upload-artifact@v4
         if: always()
         with:
