@@ -44,8 +44,21 @@ jobs:
           path: tunnel_url.txt
           retention-days: 1
           overwrite: true
-      - name: Keep alive
-        run: sleep 3600
+      - name: Keep alive until tests finish
+        run: |
+          echo "Monitoring test jobs..."
+          while true; do
+            JOBS=$(gh api repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs --jq '[.jobs[] | select(.name | startswith("test")) | {status: .status, conclusion: .conclusion}]' 2>/dev/null)
+            RUNNING=$(echo "$JOBS" | python3 -c "import sys,json; j=json.load(sys.stdin); print(sum(1 for x in j if x.get('status') in ('in_progress','queued','pending')))" 2>/dev/null || echo "1")
+            if [ "$RUNNING" -eq 0 ] 2>/dev/null; then
+              echo "All test jobs completed. Stopping monitor."
+              exit 0
+            fi
+            echo "  $RUNNING test job(s) still running..."
+            sleep 30
+          done
+        env:
+          GH_TOKEN: ${{ github.token }}
 
   test:
     runs-on: ubuntu-latest
@@ -103,15 +116,16 @@ jobs:
             adb wait-for-device
             sleep 5
             adb shell settings put system screen_off_timeout 2147483647
-            adb shell input keyevent 82
-            sleep 1
-            nohup python monitor/streamer.py --server "$TUNNEL_URL" --device "auto" --device-name "${{ matrix.device }}" --api-level "${{ matrix.api-level }}" --screen-size "${{ matrix.screen }}" --interval 3 --output-dir artifacts > /dev/null 2>&1 &
+            adb shell settings put secure accessibility_enabled 1
+            adb shell settings put secure touch_exploration_enabled 1
+            adb shell settings put global animate_controls 0
+            adb shell settings put global transition_animation_scale 0.0
             wget -q "${{ inputs.apk_url }}" -O app.apk
             adb install app.apk
             sleep 2
             adb shell monkey -p "${{ inputs.package_name }}" -c android.intent.category.LAUNCHER 1
             sleep 3
-            python scripts/auto_explore.py --device "auto" --package "${{ inputs.package_name }}" --max-steps 50 --output-dir artifacts
+            python scripts/auto_explore.py --device "auto" --package "${{ inputs.package_name }}" --max-steps 50 --output-dir artifacts --server "$TUNNEL_URL"
             adb exec-out screencap -p > artifacts/screenshots/final_screen.png
             python scripts/generate_report.py --input-dir artifacts --output-dir artifacts/reports --package "${{ inputs.package_name }}" --device "${{ matrix.device }}" --api-level "${{ matrix.api-level }}" --screen "${{ matrix.screen }}"
             adb logcat -d > artifacts/logs/logcat_full.txt || true

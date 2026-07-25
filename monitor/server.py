@@ -65,6 +65,31 @@ async def register_device(request: Request):
     return {"status": "ok", "device_id": device_id}
 
 
+@app.post("/api/screenshot")
+async def receive_screenshot_generic(request: Request):
+    data = await request.json()
+    image_b64 = data.get("image", "")
+    step = data.get("step", 0)
+    device_id = data.get("device_id", f"device_{int(time.time())}")
+    if device_id not in device_states:
+        device_states[device_id] = {
+            "device_id": device_id,
+            "api_level": "?",
+            "device_name": device_id,
+            "screen_size": "?",
+            "status": "streaming",
+            "last_update": time.time(),
+            "step": step,
+            "screens_found": 0
+        }
+    device_states[device_id]["last_update"] = time.time()
+    device_states[device_id]["step"] = step
+    device_states[device_id]["status"] = "streaming"
+    latest_screenshots[device_id] = image_b64
+    await broadcast_screenshot(device_id, image_b64, step, 0)
+    return {"status": "ok"}
+
+
 @app.post("/api/device/{device_id}/screenshot")
 async def receive_screenshot(device_id: str, request: Request):
     data = await request.json()

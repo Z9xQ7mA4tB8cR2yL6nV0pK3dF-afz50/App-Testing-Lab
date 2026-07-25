@@ -6,7 +6,9 @@ Works with Flutter, React Native, and native Android apps.
 """
 
 import argparse
+import base64
 import hashlib
+import io
 import json
 import os
 import subprocess
@@ -16,8 +18,14 @@ import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
-import struct
-import zlib
+from urllib.request import Request, urlopen
+from urllib.error import URLError
+
+try:
+    from PIL import Image
+except ImportError:
+    subprocess.run([sys.executable, "-m", "pip", "install", "Pillow"], check=True, capture_output=True)
+    from PIL import Image
 
 
 @dataclass
@@ -256,11 +264,12 @@ class ScreenComparator:
 class AutoExplorer:
     """Production-grade Android app auto-explorer with multi-strategy approach."""
 
-    def __init__(self, adb: ADBController, package: str, output_dir: str, max_steps: int = 50):
+    def __init__(self, adb: ADBController, package: str, output_dir: str, max_steps: int = 50, server_url: str = ""):
         self.adb = adb
         self.package = package
         self.output_dir = Path(output_dir)
         self.max_steps = max_steps
+        self.server_url = server_url.rstrip("/") if server_url else ""
         self.screenshots_dir = self.output_dir / "screenshots"
         self.logs_dir = self.output_dir / "logs"
         self.screenshots_dir.mkdir(parents=True, exist_ok=True)
@@ -342,8 +351,30 @@ class AutoExplorer:
         filename = f"step_{self.step_count:03d}_{label}_{timestamp}.png"
         filepath = self.screenshots_dir / filename
         if self.adb.screencap(str(filepath)):
+            self._send_screenshot(filepath)
             return str(filepath)
         return ""
+
+    def _send_screenshot(self, filepath: str):
+        if not self.server_url:
+            return
+        try:
+            with open(filepath, "rb") as f:
+                img_data = f.read()
+            img = Image.open(io.BytesIO(img_data))
+            max_height = 360
+            if img.height > max_height:
+                ratio = max_height / img.height
+                new_width = int(img.width * ratio)
+                img = img.resize((new_width, max_height), Image.LANCZOS)
+            buffer = io.BytesIO()
+            img.convert("RGB").save(buffer, format="JPEG", quality=50, optimize=True)
+            b64 = base64.b64encode(buffer.getvalue()).decode("utf-8")
+            data = json.dumps({"image": b64, "step": self.step_count, "device_id": self.package}).encode()
+            req = Request(f"{self.server_url}/api/screenshot", data=data, headers={"Content-Type": "application/json"})
+            urlopen(req, timeout=5)
+        except:
+            pass
 
     def strategy_ui_hierarchy(self) -> list[Element]:
         """Strategy 1: Standard uiautomator dump."""
@@ -558,6 +589,7 @@ def main():
     parser.add_argument("--package", "-p", required=True, help="App package name")
     parser.add_argument("--max-steps", "-m", type=int, default=50, help="Max exploration steps")
     parser.add_argument("--output-dir", "-o", default="artifacts", help="Output directory")
+    parser.add_argument("--server", "-s", default="", help="Monitor server URL for screenshot streaming")
     args = parser.parse_args()
 
     device_id = args.device
@@ -583,7 +615,8 @@ def main():
         adb=adb,
         package=args.package,
         output_dir=args.output_dir,
-        max_steps=args.max_steps
+        max_steps=args.max_steps,
+        server_url=args.server
     )
     explorer.explore()
 
