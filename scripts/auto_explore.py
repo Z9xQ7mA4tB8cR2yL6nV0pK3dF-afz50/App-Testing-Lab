@@ -309,34 +309,26 @@ class AutoExplorer:
                     data = self._send_queue.get(timeout=2)
                     if data is None:
                         break
-                    if conn is None:
-                        conn = self._get_http_conn()
-                    conn.request("POST", "/api/screenshot", body=data, headers={"Content-Type": "application/json"})
-                    resp = conn.getresponse()
-                    resp.read()
-                except (BrokenPipeError, ConnectionError, http.client.RemoteDisconnected):
-                    conn = None
+                except queue.Empty:
+                    if conn:
+                        try:
+                            conn.request("GET", "/")
+                            conn.getresponse().read()
+                        except:
+                            conn = None
+                    continue
+                for attempt in range(2):
                     try:
-                        if not self._sender_running:
-                            break
-                        data = self._send_queue.get(timeout=2)
-                        if data is None:
-                            break
-                        conn = self._get_http_conn()
+                        if conn is None:
+                            conn = self._get_http_conn()
                         conn.request("POST", "/api/screenshot", body=data, headers={"Content-Type": "application/json"})
                         resp = conn.getresponse()
                         resp.read()
+                        break
                     except:
                         conn = None
-                except queue.Empty:
-                    try:
-                        if conn:
-                            conn.request("GET", "/ping")
-                            conn.getresponse().read()
-                    except:
-                        conn = None
-                except Exception:
-                    conn = None
+                        if attempt == 1:
+                            time.sleep(3)
         self._sender_thread = threading.Thread(target=_run, daemon=True)
         self._sender_thread.start()
 

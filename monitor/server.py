@@ -40,11 +40,16 @@ latest_screenshots: Dict[str, str] = {}
 DASHBOARD_HTML = Path(__file__).parent / "dashboard.html"
 
 
-@app.get("/", response_class=HTMLResponse)
+@app.get("/")
 async def dashboard():
     if DASHBOARD_HTML.exists():
-        return DASHBOARD_HTML.read_text(encoding="utf-8")
-    return "<h1>Dashboard not found</h1>"
+        return HTMLResponse(DASHBOARD_HTML.read_text(encoding="utf-8"))
+    return HTMLResponse("<h1>Dashboard not found</h1>")
+
+
+@app.get("/ping")
+async def ping():
+    return {"ok": True}
 
 
 @app.post("/api/device/register")
