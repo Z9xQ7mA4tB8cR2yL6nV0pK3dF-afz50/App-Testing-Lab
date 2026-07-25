@@ -561,7 +561,7 @@ def main():
     args = parser.parse_args()
 
     device_id = args.device
-    if not device_id:
+    if not device_id or device_id == "auto":
         try:
             result = subprocess.run(["adb", "devices"], capture_output=True, text=True)
             lines = result.stdout.strip().split("\n")[1:]

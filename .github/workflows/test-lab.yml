@@ -102,15 +102,16 @@ jobs:
             pip install -r scripts/requirements.txt -q
             adb wait-for-device
             sleep 5
-            DEVICE_ID=$(adb devices | grep emulator | awk '{print $1}')
-            echo "Device: $DEVICE_ID"
-            python monitor/streamer.py --server "$TUNNEL_URL" --device "$DEVICE_ID" --device-name "${{ matrix.device }}" --api-level "${{ matrix.api-level }}" --screen-size "${{ matrix.screen }}" --interval 3 --output-dir artifacts &
+            adb shell settings put system screen_off_timeout 2147483647
+            adb shell input keyevent 82
+            sleep 1
+            nohup python monitor/streamer.py --server "$TUNNEL_URL" --device "auto" --device-name "${{ matrix.device }}" --api-level "${{ matrix.api-level }}" --screen-size "${{ matrix.screen }}" --interval 3 --output-dir artifacts > /dev/null 2>&1 &
             wget -q "${{ inputs.apk_url }}" -O app.apk
             adb install app.apk
             sleep 2
             adb shell monkey -p "${{ inputs.package_name }}" -c android.intent.category.LAUNCHER 1
             sleep 3
-            python scripts/auto_explore.py --device "$DEVICE_ID" --package "${{ inputs.package_name }}" --max-steps 50 --output-dir artifacts
+            python scripts/auto_explore.py --device "auto" --package "${{ inputs.package_name }}" --max-steps 50 --output-dir artifacts
             adb exec-out screencap -p > artifacts/screenshots/final_screen.png
             python scripts/generate_report.py --input-dir artifacts --output-dir artifacts/reports --package "${{ inputs.package_name }}" --device "${{ matrix.device }}" --api-level "${{ matrix.api-level }}" --screen "${{ matrix.screen }}"
             adb logcat -d > artifacts/logs/logcat_full.txt || true
