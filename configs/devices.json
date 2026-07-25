@@ -1,0 +1,39 @@
+{
+  "devices": [
+    {
+      "name": "pixel",
+      "api_level": 28,
+      "screen_size": "1080x1920",
+      "density": 420,
+      "description": "Budget device - Android 9"
+    },
+    {
+      "name": "pixel_6",
+      "api_level": 31,
+      "screen_size": "1080x2400",
+      "density": 411,
+      "description": "Mid-range device - Android 12"
+    },
+    {
+      "name": "pixel_7_pro",
+      "api_level": 34,
+      "screen_size": "1440x3120",
+      "density": 560,
+      "description": "Flagship device - Android 14"
+    }
+  ],
+  "test_configs": {
+    "quick": {
+      "max_steps": 15,
+      "description": "Quick smoke test"
+    },
+    "normal": {
+      "max_steps": 50,
+      "description": "Standard test coverage"
+    },
+    "deep": {
+      "max_steps": 100,
+      "description": "Deep exploration"
+    }
+  }
+}
