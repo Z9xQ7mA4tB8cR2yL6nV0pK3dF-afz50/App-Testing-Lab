@@ -264,12 +264,13 @@ class ScreenComparator:
 class AutoExplorer:
     """Production-grade Android app auto-explorer with multi-strategy approach."""
 
-    def __init__(self, adb: ADBController, package: str, output_dir: str, max_steps: int = 50, server_url: str = ""):
+    def __init__(self, adb: ADBController, package: str, output_dir: str, max_steps: int = 50, server_url: str = "", device_label: str = ""):
         self.adb = adb
         self.package = package
         self.output_dir = Path(output_dir)
         self.max_steps = max_steps
         self.server_url = server_url.rstrip("/") if server_url else ""
+        self.device_label = device_label or ("emulator" if not adb.device_id else adb.device_id)
         self.screenshots_dir = self.output_dir / "screenshots"
         self.logs_dir = self.output_dir / "logs"
         self.screenshots_dir.mkdir(parents=True, exist_ok=True)
@@ -286,9 +287,9 @@ class AutoExplorer:
 
     def get_screen_signature(self, elements: list[Element]) -> str:
         sig_parts = []
-        sorted_elems = sorted(elements, key=lambda e: (e.bounds, e.text))
+        sorted_elems = sorted(elements, key=lambda e: (e.class_name, e.bounds, e.text[:6]))
         for e in sorted_elems[:15]:
-            sig_parts.append(f"{e.class_name}:{e.text}:{e.content_desc}:{e.bounds}")
+            sig_parts.append(f"{e.class_name}:{e.bounds}")
         return hashlib.md5("|".join(sig_parts).encode()).hexdigest()[:12]
 
     def parse_elements_from_xml(self, root: ET.Element) -> list[Element]:
@@ -370,7 +371,7 @@ class AutoExplorer:
             buffer = io.BytesIO()
             img.convert("RGB").save(buffer, format="JPEG", quality=50, optimize=True)
             b64 = base64.b64encode(buffer.getvalue()).decode("utf-8")
-            data = json.dumps({"image": b64, "step": self.step_count, "device_id": self.package}).encode()
+            data = json.dumps({"image": b64, "step": self.step_count, "device_id": self.device_label}).encode()
             req = Request(f"{self.server_url}/api/screenshot", data=data, headers={"Content-Type": "application/json"})
             urlopen(req, timeout=5)
         except:
@@ -590,6 +591,7 @@ def main():
     parser.add_argument("--max-steps", "-m", type=int, default=50, help="Max exploration steps")
     parser.add_argument("--output-dir", "-o", default="artifacts", help="Output directory")
     parser.add_argument("--server", "-s", default="", help="Monitor server URL for screenshot streaming")
+    parser.add_argument("--device-label", default="", help="Label for dashboard display")
     args = parser.parse_args()
 
     device_id = args.device
@@ -616,7 +618,8 @@ def main():
         package=args.package,
         output_dir=args.output_dir,
         max_steps=args.max_steps,
-        server_url=args.server
+        server_url=args.server,
+        device_label=args.device_label
     )
     explorer.explore()
 

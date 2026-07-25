@@ -110,22 +110,19 @@ jobs:
           emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -no-snapshot
           disable-animations: true
           script: |
+            set -x
             mkdir -p artifacts/screenshots artifacts/reports artifacts/logs
             pip install Pillow -q
             pip install -r scripts/requirements.txt -q
             adb wait-for-device
             sleep 5
             adb shell settings put system screen_off_timeout 2147483647
-            adb shell settings put secure accessibility_enabled 1
-            adb shell settings put secure touch_exploration_enabled 1
-            adb shell settings put global animate_controls 0
-            adb shell settings put global transition_animation_scale 0.0
             wget -q "${{ inputs.apk_url }}" -O app.apk
             adb install app.apk
             sleep 2
             adb shell monkey -p "${{ inputs.package_name }}" -c android.intent.category.LAUNCHER 1
             sleep 3
-            python scripts/auto_explore.py --device "auto" --package "${{ inputs.package_name }}" --max-steps 50 --output-dir artifacts --server "$TUNNEL_URL"
+            python scripts/auto_explore.py --device "auto" --package "${{ inputs.package_name }}" --max-steps 50 --output-dir artifacts --server "$TUNNEL_URL" --device-label "${{ matrix.device }}-api${{ matrix.api-level }}"
             adb exec-out screencap -p > artifacts/screenshots/final_screen.png
             python scripts/generate_report.py --input-dir artifacts --output-dir artifacts/reports --package "${{ inputs.package_name }}" --device "${{ matrix.device }}" --api-level "${{ matrix.api-level }}" --screen "${{ matrix.screen }}"
             adb logcat -d > artifacts/logs/logcat_full.txt || true
